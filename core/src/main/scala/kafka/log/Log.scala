@@ -183,7 +183,11 @@ object RollParams {
 /**
  * An append-only log for storing messages.
  *
+ * 只能追加写入消息
+ *
  * The log is a sequence of LogSegments, each with a base offset denoting the first message in the segment.
+ *
+ * 日志由若干的日志段组成，日志段的基准位移代表第一条消息的位移
  *
  * New log segments are created according to a configurable policy that controls the size in bytes or time interval
  * for a given segment.
@@ -267,14 +271,26 @@ class Log(@volatile private var _dir: File,
   // Visible for testing
   @volatile var leaderEpochCache: Option[LeaderEpochFileCache] = None
 
+  /**
+   * 1. 创建分区日志路径
+   * 2. 初始化 Leader Epoch Cache
+   *    a. 创建 Leader Epoch 检查点文件
+   *    b. 生成 Leader Epoch Cache 对象
+   * 3. 加载所有日志段对象
+   * 4. 更新nextOffsetMetadata和logStartOffset
+   * 5. 更新Leader Epoch Cache，清除无效数据
+   */
   locally {
     val startMs = time.milliseconds
 
     // create the log directory if it doesn't exist
+    // 1. 创建分区日志路径
     Files.createDirectories(dir.toPath)
 
+    // 2. 初始化 Leader Epoch Cache
     initializeLeaderEpochCache()
 
+    // 3. 加载所有日志段对象
     val nextOffset = loadSegments()
 
     /* Calculate the offset of the next message */
@@ -494,6 +510,7 @@ class Log(@volatile private var _dir: File,
   def recordVersion: RecordVersion = config.messageFormatVersion.recordVersion
 
   private def initializeLeaderEpochCache(): Unit = lock synchronized {
+    // a. 创建 Leader Epoch 检查点文件
     val leaderEpochFile = LeaderEpochCheckpointFile.newFile(dir)
 
     def newLeaderEpochFileCache(): LeaderEpochFileCache = {
@@ -501,6 +518,7 @@ class Log(@volatile private var _dir: File,
       new LeaderEpochFileCache(topicPartition, logEndOffset _, checkpointFile)
     }
 
+    //b. 生成 Leader Epoch Cache 对象
     if (recordVersion.precedes(RecordVersion.V2)) {
       val currentCache = if (leaderEpochFile.exists())
         Some(newLeaderEpochFileCache())
@@ -2417,12 +2435,16 @@ object Log {
   /** a time index file */
   val TimeIndexFileSuffix = ".timeindex"
 
+  // Kafka 为幂等型或事务型 Producer 所做的快照文件
   val ProducerSnapshotFileSuffix = ".snapshot"
 
   /** an (aborted) txn index */
   val TxnIndexFileSuffix = ".txnindex"
 
   /** a file that is scheduled to be deleted */
+  // 删除日志段操作创建的文件。
+  // 目前删除日志段文件是异步操作，Broker 端把日志段文件从.log 后缀修改为.deleted 后缀。
+  // 如果你看到一大堆.deleted 后缀的文件名，这是 Kafka 在执行日志段文件删除。
   val DeletedFileSuffix = ".deleted"
 
   /** A temporary file that is being used for log cleaning */
@@ -2440,6 +2462,7 @@ object Log {
   val CleanShutdownFile = ".kafka_cleanshutdown"
 
   /** a directory that is scheduled to be deleted */
+  // 应用于文件夹的。当你删除一个主题的时候，主题的分区文件夹会被加上这个后缀。
   val DeleteDirSuffix = "-delete"
 
   /** a directory that is used for future partition */
@@ -2469,6 +2492,11 @@ object Log {
   /**
    * Make log segment file name from offset bytes. All this does is pad out the offset number with zeros
    * so that ls sorts the files numerically.
+   *
+   *  通过给定的位移值计算出对应的日志段文件名。
+   *  Kafka 日志文件固定是 20 位的长度，filenamePrefixFromOffset 方法就是用前面补 0 的方式，把给定位移值扩充成一个固定 20 位长度的字符串。
+   *
+   *  举个例子，我们给定一个位移值是 12345，那么 Broker 端磁盘上对应的日志段文件名就应该是 00000000000000012345.log
    *
    * @param offset The offset to use in the file name
    * @return The filename
