@@ -49,8 +49,8 @@ import scala.math._
  * 日志段会保存在2个文件中，一个是索引文件，一个是日志文件
  *
  * @param log The file records containing log entries     消息日志文件：真正的消息内容
- * @param lazyOffsetIndex The offset index                索引的位移
- * @param lazyTimeIndex The timestamp index               索引的时间戳
+ * @param lazyOffsetIndex The offset index                位移索引
+ * @param lazyTimeIndex The timestamp index               时间戳索引
  * @param txnIndex The transaction index                  已终止事务的索引
  * @param baseOffset A lower bound on the offsets in this segment     起始位移
  * @param indexIntervalBytes The approximate number of bytes between entries in the index   Broker端参数log.index.interval.bytes值，它控制了日志段对象新增索引项的频率
@@ -71,6 +71,7 @@ class LogSegment private[log] (val log: FileRecords,
 
   def timeIndex: TimeIndex = lazyTimeIndex.get
 
+  // 判断日志是否需要roll，理解下来，应该是判断是否需要切分日志
   def shouldRoll(rollParams: RollParams): Boolean = {
     val reachedRollMs = timeWaitedForRoll(rollParams.now, rollParams.maxTimestampInMessages) > rollParams.maxSegmentMs - rollJitterMs
     size > rollParams.maxSegmentBytes - rollParams.messagesSize ||
@@ -103,6 +104,7 @@ class LogSegment private[log] (val log: FileRecords,
 
   // The timestamp we used for time based log rolling and for ensuring max compaction delay
   // volatile for LogCleaner to see the update
+  // 第一条消息的时间位移
   @volatile private var rollingBasedTimestamp: Option[Long] = None
 
   /* The maximum timestamp we see so far */
@@ -161,6 +163,7 @@ class LogSegment private[log] (val log: FileRecords,
       val physicalPosition = log.sizeInBytes()
       //2. 如果日志段大小为0，也就是日志段是空的，记录写入消息集合的最大时间戳
       if (physicalPosition == 0)
+        //TODO 为什么要记录最大的消息的位移
         rollingBasedTimestamp = Some(largestTimestamp)
       //3. 确保最大的位移是合法的
       // 也就是查看 largestOffset 是否处于 [baseOffset, Int.MaxValue - baseOffset]之间
@@ -549,6 +552,7 @@ class LogSegment private[log] (val log: FileRecords,
   /**
     * If not previously loaded,
     * load the timestamp of the first message into memory.
+    *  加载第一条消息的时间
     */
   private def loadFirstBatchTimestamp(): Unit = {
     if (rollingBasedTimestamp.isEmpty) {
@@ -566,6 +570,10 @@ class LogSegment private[log] (val log: FileRecords,
    * If the first batch does not have a timestamp, we use the wall clock time to determine when to roll a segment. A
    * segment is rolled if the difference between the current wall clock time and the segment create time exceeds the
    * segment rolling time.
+   *
+   * 日志段等待回滚的时间
+   *
+   *
    */
   def timeWaitedForRoll(now: Long, messageTimestamp: Long) : Long = {
     // Load the timestamp of the first message into memory

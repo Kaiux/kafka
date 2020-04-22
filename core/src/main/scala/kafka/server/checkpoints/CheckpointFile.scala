@@ -37,17 +37,26 @@ class CheckpointReadBuffer[T](location: String,
                               reader: BufferedReader,
                               version: Int,
                               formatter: CheckpointFileFormatter[T]) extends Logging {
+  /**
+   * example:
+   *  0
+   *  1
+   *  0 0
+   */
   def read(): Seq[T] = {
     def malformedLineException(line: String) =
       new IOException(s"Malformed line in checkpoint file ($location): '$line'")
 
     var line: String = null
     try {
+      //第一行数据
       line = reader.readLine()
       if (line == null)
         return Seq.empty
       line.toInt match {
+          // 第一行应该代表文件的版本
         case fileVersion if fileVersion == version =>
+          // 第二行代表"期望大小"，简单来说，就是下面有几行数据
           line = reader.readLine()
           if (line == null)
             return Seq.empty
@@ -65,6 +74,7 @@ class CheckpointReadBuffer[T](location: String,
           }
           if (entries.size != expectedSize)
             throw new IOException(s"Expected $expectedSize entries in checkpoint file ($location), but found only ${entries.size}")
+          //返回 一个leader epoch 序列，不包含前2行，其实前2行相当于这个文件的元数据区域
           entries
         case _ =>
           throw new IOException(s"Unrecognized version of the checkpoint file ($location): " + version)
