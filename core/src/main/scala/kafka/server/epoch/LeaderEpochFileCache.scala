@@ -43,6 +43,7 @@ class LeaderEpochFileCache(topicPartition: TopicPartition,
   this.logIdent = s"[LeaderEpochCache $topicPartition] "
 
   private val lock = new ReentrantReadWriteLock()
+  //TODO why write lock
   private var epochs: ArrayBuffer[EpochEntry] = inWriteLock(lock) {
     val read = checkpoint.read()
     new ArrayBuffer(read.size) ++= read
@@ -58,6 +59,7 @@ class LeaderEpochFileCache(topicPartition: TopicPartition,
         true
       } else {
         val lastEntry = epochs.last
+        //epoch不匹配，或者startOffset落后
         lastEntry.epoch != epoch || startOffset < lastEntry.startOffset
       }
 
@@ -72,8 +74,10 @@ class LeaderEpochFileCache(topicPartition: TopicPartition,
    * Remove any entries which violate monotonicity following the insertion of an assigned epoch.
    */
   private def truncateAndAppend(entryToAppend: EpochEntry): Unit = {
+    // epoch 版本号 和 startOffset 都应该是递增的，此处检查是否递增
     validateAndMaybeWarn(entryToAppend)
 
+    // 把epoch 分为 2组
     val (retainedEpochs, removedEpochs) = epochs.partition { entry =>
       entry.epoch < entryToAppend.epoch && entry.startOffset < entryToAppend.startOffset
     }
@@ -82,6 +86,7 @@ class LeaderEpochFileCache(topicPartition: TopicPartition,
 
     if (removedEpochs.isEmpty) {
       debug(s"Appended new epoch entry $entryToAppend. Cache now contains ${epochs.size} entries.")
+      // removedEpochs.size==1 && removedEpochs.head.startOffset != entryToAppend.startOffset
     } else if (removedEpochs.size > 1 || removedEpochs.head.startOffset != entryToAppend.startOffset) {
       // Only log a warning if there were non-trivial removals. If the start offset of the new entry
       // matches the start offset of the removed epoch, then no data has been written and the truncation
@@ -122,9 +127,14 @@ class LeaderEpochFileCache(topicPartition: TopicPartition,
     * of the first Leader Epoch larger than the Leader Epoch requested, or else the Log End
     * Offset if the latest epoch was requested.
     *
+    * 指定epoch的end offset就是指定epoch+1的start offset
+    * 如果是最后一个epoch，那么就返回当前的LEO
+    *
     * During the upgrade phase, where there are existing messages may not have a leader epoch,
     * if requestedEpoch is < the first epoch cached, UNDEFINED_EPOCH_OFFSET will be returned
     * so that the follower falls back to High Water Mark.
+    *
+    * 如果请求的epoch小于第一个epoch，那么follower副本就会阶段到HW对应的offset
     *
     * @param requestedEpoch requested leader epoch
     * @return found leader epoch and end offset
@@ -141,9 +151,14 @@ class LeaderEpochFileCache(topicPartition: TopicPartition,
           // Followers should not have any reason to query for the end offset of the current epoch, but a consumer
           // might if it is verifying its committed offset following a group rebalance. In this case, we return
           // the current log end offset which makes the truncation check work as expected.
+          // 如果是最新的epoch，那么返回LEO
           (requestedEpoch, logEndOffset())
         } else {
+          // 首先根据requestedEpoch分类
           val (subsequentEpochs, previousEpochs) = epochs.partition { e => e.epoch > requestedEpoch}
+          // 如果没有比requestedEpoch版本更大的epoch
+          // 上面已经判断过requestedEpoch是不是最新的epoch
+          // 这种情况说明，请求的epoch是一个未来的epoch，那么是没办法找到offset的
           if (subsequentEpochs.isEmpty) {
             // The requested epoch is larger than any known epoch. This case should never be hit because
             // the latest cached epoch is always the largest.
@@ -154,10 +169,12 @@ class LeaderEpochFileCache(topicPartition: TopicPartition,
             // epochs in between, but the point is that the data has already been removed from the log
             // and we want to ensure that the follower can replicate correctly beginning from the leader's
             // start offset.
+            // 如果没有比requestedEpoch更小的，说明requestedEpoch是头节点，那么找出比requestedEpoch大的集合中的第一个即可
             (requestedEpoch, subsequentEpochs.head.startOffset)
           } else {
             // We have at least one previous epoch and one subsequent epoch. The result is the first
             // prior epoch and the starting offset of the first subsequent epoch.
+            // 这种情况表示，比requestedEpoch大的和小的都有
             (previousEpochs.last.epoch, subsequentEpochs.head.startOffset)
           }
         }
@@ -169,11 +186,16 @@ class LeaderEpochFileCache(topicPartition: TopicPartition,
 
   /**
     * Removes all epoch entries from the store with start offsets greater than or equal to the passed offset.
+    * 删除endOffset之后的所有数据，包括endOffset，参考https://weread.qq.com/web/reader/e9a32a0071848698e9a39b8kd9d320f022ed9d4f495e456
+    * 应对可能会出现一些数据不一致的情况
     */
   def truncateFromEnd(endOffset: Long): Unit = {
     inWriteLock(lock) {
+      // 只有当latestEntry的startOffset大于endOffset的时候，才有东西可以截断
+      // 第二个判断其实包含了第一个判断 endOffset >= 0
       if (endOffset >= 0 && latestEntry.exists(_.startOffset >= endOffset)) {
         val (subsequentEntries, previousEntries) = epochs.partition(_.startOffset >= endOffset)
+        // 直接截断，暴力👍
         epochs = previousEntries
 
         flush()
@@ -187,6 +209,8 @@ class LeaderEpochFileCache(topicPartition: TopicPartition,
   /**
     * Clears old epoch entries. This method searches for the oldest epoch < offset, updates the saved epoch offset to
     * be offset, then clears any previous epoch entries.
+    *
+    * 清空startOffset之前所有的数据，保留startOffset
     *
     * This method is exclusive: so clearEarliest(6) will retain an entry at offset 6.
     *

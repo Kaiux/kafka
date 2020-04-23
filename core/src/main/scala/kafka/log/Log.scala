@@ -511,25 +511,29 @@ class Log(@volatile private var _dir: File,
 
   def recordVersion: RecordVersion = config.messageFormatVersion.recordVersion
 
+  // 把leader-epoch-checkpoint缓存到内存
   private def initializeLeaderEpochCache(): Unit = lock synchronized {
-    // a. 创建 Leader Epoch 检查点文件
+    // a. 创建 Leader Epoch 检查点文件, 简单来说，就是新建leader-epoch-checkpoint文件
     val leaderEpochFile = LeaderEpochCheckpointFile.newFile(dir)
 
+    // 新建LeaderEpochFileCache，也就是把文件缓存到内存，这个文件比较小，可以全部缓存到内存
     def newLeaderEpochFileCache(): LeaderEpochFileCache = {
       val checkpointFile = new LeaderEpochCheckpointFile(leaderEpochFile, logDirFailureChannel)
       new LeaderEpochFileCache(topicPartition, logEndOffset _, checkpointFile)
     }
 
     //b. 生成 Leader Epoch Cache 对象
+    // 如果消息版本不是V2，那么直接删除对应的文件
+    // 这块可以优化一下，代码有些冗余
     if (recordVersion.precedes(RecordVersion.V2)) {
       val currentCache = if (leaderEpochFile.exists())
         Some(newLeaderEpochFileCache())
       else
         None
-
+      // 如果有对应的文件缓存
       if (currentCache.exists(_.nonEmpty))
         warn(s"Deleting non-empty leader epoch cache due to incompatible message format $recordVersion")
-
+      // 删除文件
       Files.deleteIfExists(leaderEpochFile.toPath)
       leaderEpochCache = None
     } else {
@@ -556,6 +560,7 @@ class Log(@volatile private var _dir: File,
 
     val swapFiles = mutable.Set[File]()
     val cleanFiles = mutable.Set[File]()
+    //初始化变量的时候，不要总想着null 🤷‍
     var minCleanedFileOffset = Long.MaxValue
 
     for (file <- dir.listFiles if file.isFile) {
