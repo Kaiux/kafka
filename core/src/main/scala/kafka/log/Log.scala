@@ -329,6 +329,17 @@ class Log(@volatile private var _dir: File,
       0
   }
 
+  // 统计HW和LEO之间的消息数量
+  def getMessageCountBetweenHWAndLEO(): Int = {
+    val diff = nextOffsetMetadata.messageOffset - highWatermarkMetadata.messageOffset
+    if (diff < 0L) {
+      warn(s"LEO is lower than HW")
+      0
+    } else {
+      activeSegment.read(highWatermarkMetadata.messageOffset, Integer.MAX_VALUE, nextOffsetMetadata.messageOffset).records.records.asScala.size
+    }
+  }
+
   def updateConfig(newConfig: LogConfig): Unit = {
     val oldConfig = this.config
     this.config = newConfig
@@ -358,6 +369,7 @@ class Log(@volatile private var _dir: File,
    * @return the updated high watermark offset
    */
   def updateHighWatermark(hw: Long): Long = {
+    //确保 logStartOffset < HW < LEO
     val newHighWatermark = if (hw < logStartOffset)
       logStartOffset
     else if (hw > logEndOffset)
@@ -372,8 +384,12 @@ class Log(@volatile private var _dir: File,
    * Update the high watermark to a new value if and only if it is larger than the old value. It is
    * an error to update to a value which is larger than the log end offset.
    *
+   * 更新HW，HW只会新增
+   *
    * This method is intended to be used by the leader to update the high watermark after follower
    * fetch offsets have been updated.
+   *
+   * 当follower的位移被更新后，leader会尝试更新这个值
    *
    * @return the old high watermark, if updated by the new value
    */
@@ -548,6 +564,8 @@ class Log(@volatile private var _dir: File,
    * the smallest offset .clean file could be part of an incomplete split operation. Such .swap files are also deleted
    * by this method.
    *
+   * 删除所有的临时文件，新建一个交换文件的列表。
+   *
    * @return Set of .swap files that are valid to be swapped in as segment files
    */
   private def removeTempFilesAndCollectSwapFiles(): Set[File] = {
@@ -581,6 +599,7 @@ class Log(@volatile private var _dir: File,
         // we crashed in the middle of a swap operation, to recover:
         // if a log, delete the index files, complete the swap operation later
         // if an index just delete the index files, they will be rebuilt
+        // 删除最后的.swap 可以看出 原始的文件名应该是 .log.swap
         val baseFile = new File(CoreUtils.replaceSuffix(file.getPath, SwapFileSuffix, ""))
         info(s"Found file ${file.getAbsolutePath} from interrupted swap operation.")
         if (isIndexFile(baseFile)) {
@@ -627,7 +646,7 @@ class Log(@volatile private var _dir: File,
       //根据文件名判断文件类型
       if (isIndexFile(file)) {
         // if it is an index file, make sure it has a corresponding .log file
-        //取出文件的位移，
+        //取出文件的位移，找出对应的日志文件
         val offset = offsetFromFile(file)
         val logFile = Log.logFile(dir, offset)
         if (!logFile.exists) {
@@ -731,6 +750,7 @@ class Log(@volatile private var _dir: File,
     // first do a pass through the files in the log directory and remove any temporary files
     // and find any interrupted swap operations
     // 清空已有日志段集合，并重新加载日志段文件
+    // 字面意思：清空临时文件，加载交换文件
     val swapFiles = removeTempFilesAndCollectSwapFiles()
 
     // Now do a second pass and load all the log and index files.
@@ -1811,17 +1831,24 @@ class Log(@volatile private var _dir: File,
     }
   }
 
+  //基于时间维度的删除策略
   private def deleteRetentionMsBreachedSegments(): Int = {
     if (config.retentionMs < 0) return 0
     val startMs = time.milliseconds
+    //如何segment.largestTimestamp大于配置文件中的retentionMs，就执行删除操作
     deleteOldSegments((segment, _) => startMs - segment.largestTimestamp > config.retentionMs,
       reason = s"retention time ${config.retentionMs}ms breach")
   }
 
+  //基于空间维度的删除策略
   private def deleteRetentionSizeBreachedSegments(): Int = {
+
+    //size是日志的大小
     if (config.retentionSize < 0 || size < config.retentionSize) return 0
+    //找出差距
     var diff = size - config.retentionSize
 
+    //如果日志段的大小大于diff，那么执行删除操作
     def shouldDelete(segment: LogSegment, nextSegmentOpt: Option[LogSegment]) = {
       if (diff - segment.size >= 0) {
         diff -= segment.size
@@ -1834,6 +1861,7 @@ class Log(@volatile private var _dir: File,
     deleteOldSegments(shouldDelete, reason = s"retention size in bytes ${config.retentionSize} breach")
   }
 
+  //基于LogStartOffset维度的删除策略
   private def deleteLogStartOffsetBreachedSegments(): Int = {
     def shouldDelete(segment: LogSegment, nextSegmentOpt: Option[LogSegment]) =
       nextSegmentOpt.exists(_.baseOffset <= logStartOffset)

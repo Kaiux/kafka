@@ -122,16 +122,16 @@ object AdminUtils extends Logging {
     }
   }
 
-  private def assignReplicasToBrokersRackUnaware(nPartitions: Int,
-                                                 replicationFactor: Int,
-                                                 brokerList: Seq[Int],
-                                                 fixedStartIndex: Int,
-                                                 startPartitionId: Int): Map[Int, Seq[Int]] = {
-    val ret = mutable.Map[Int, Seq[Int]]()
+  private def assignReplicasToBrokersRackUnaware(nPartitions: Int,          //分区数
+                                                 replicationFactor: Int,    //副本因子
+                                                 brokerList: Seq[Int],      //集群中的broker列表
+                                                 fixedStartIndex: Int,      //起始索引，也就是第一个副本分配的位置，默认为-1
+                                                 startPartitionId: Int): Map[Int, Seq[Int]] = {   //起始分区编号，默认为-1
+    val ret = mutable.Map[Int, Seq[Int]]()//保存分配结果的集合
     val brokerArray = brokerList.toArray
-    val startIndex = if (fixedStartIndex >= 0) fixedStartIndex else rand.nextInt(brokerArray.length)
-    var currentPartitionId = math.max(0, startPartitionId)
-    var nextReplicaShift = if (fixedStartIndex >= 0) fixedStartIndex else rand.nextInt(brokerArray.length)
+    val startIndex = if (fixedStartIndex >= 0) fixedStartIndex else rand.nextInt(brokerArray.length)  //分配一个随机值
+    var currentPartitionId = math.max(0, startPartitionId)  //默认为0
+    var nextReplicaShift = if (fixedStartIndex >= 0) fixedStartIndex else rand.nextInt(brokerArray.length)  //下一个副本的偏移值，分配一个随机值
     for (_ <- 0 until nPartitions) {
       if (currentPartitionId > 0 && (currentPartitionId % brokerArray.length == 0))
         nextReplicaShift += 1
